@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-FINAL VERSION: 1688.com and Taobao.com Product Scraper for WooCommerce
-Fully automated scraping with captcha bypass and translation support.
+FINAL VERSION: 1688.com Product Scraper for WooCommerce
+Ensures reliable extraction of product name, price, description, and images.
 """
 
 import time
@@ -20,45 +20,16 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
-from fake_useragent import UserAgent
-from anticaptchaofficial.recaptchav2proxyless import *
-from anticaptchaofficial.recaptchav3proxyless import *
-from anticaptchaofficial.hcaptchaproxyless import *
-import cloudscraper
-from bs4 import BeautifulSoup
-import translators as ts
-from PIL import Image
-import io
-import hashlib
-import pickle
-import logging
-from datetime import datetime
-import concurrent.futures
-import queue
-import threading
 
 # Create necessary directories
 os.makedirs('product_images', exist_ok=True)
-os.makedirs('cookies', exist_ok=True)
-os.makedirs('logs', exist_ok=True)
 
 # Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(f'logs/scraper_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
 def log(message):
-    """Enhanced logging function"""
-    logger.info(message)
     print(f"[LOG] {message}")
+    with open('scraper_log.txt', 'a', encoding='utf-8') as f:
+        f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
 
 class FinalProductScraper:
     def __init__(self):
@@ -75,9 +46,8 @@ class FinalProductScraper:
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option('useAutomationExtension', False)
         
-        # Random user agent
-        ua = UserAgent()
-        chrome_options.add_argument(f"user-agent={ua.random}")
+        # User agent
+        chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
         
         # User data directory for session persistence
         user_data_dir = os.path.join(os.getcwd(), "chrome_user_data")
@@ -100,83 +70,11 @@ class FinalProductScraper:
             """
         })
         
-        # Initialize cloudscraper for bypassing cloudflare
-        self.scraper = cloudscraper.create_scraper(
-            browser={
-                'browser': 'chrome',
-                'platform': 'windows',
-                'mobile': False
-            }
-        )
-        
         # Product data storage
         self.products = []
-        self.image_hashes = set()  # For duplicate image detection
         
         # Translation function - load lazily
         self.translator = None
-        
-        # Initialize captcha solver
-        self.captcha_solver = None
-        self.init_captcha_solver()
-        
-        # Load cookies if available
-        self.load_cookies()
-        
-        # Initialize thread-safe queue for concurrent processing
-        self.product_queue = queue.Queue()
-        self.max_workers = 3  # Number of concurrent workers
-    
-    def init_captcha_solver(self):
-        """Initialize captcha solver with API key"""
-        try:
-            # You can set your API key here or load from environment variable
-            api_key = os.getenv('ANTICAPTCHA_KEY', '')
-            if api_key:
-                self.captcha_solver = {
-                    'recaptcha_v2': recaptchaV2Proxyless(api_key),
-                    'recaptcha_v3': recaptchaV3Proxyless(api_key),
-                    'hcaptcha': hCaptchaProxyless(api_key)
-                }
-                log("Captcha solver initialized")
-            else:
-                log("No captcha solver API key found")
-        except Exception as e:
-            log(f"Error initializing captcha solver: {e}")
-    
-    def load_cookies(self):
-        """Load cookies for both sites"""
-        try:
-            # Load 1688 cookies
-            cookie_file = os.path.join('cookies', '1688_cookies.pkl')
-            if os.path.exists(cookie_file):
-                with open(cookie_file, 'rb') as f:
-                    cookies = pickle.load(f)
-                    for cookie in cookies:
-                        self.driver.add_cookie(cookie)
-                log("Loaded 1688 cookies")
-            
-            # Load Taobao cookies
-            cookie_file = os.path.join('cookies', 'taobao_cookies.pkl')
-            if os.path.exists(cookie_file):
-                with open(cookie_file, 'rb') as f:
-                    cookies = pickle.load(f)
-                    for cookie in cookies:
-                        self.driver.add_cookie(cookie)
-                log("Loaded Taobao cookies")
-        except Exception as e:
-            log(f"Error loading cookies: {e}")
-    
-    def save_cookies(self, site):
-        """Save cookies for the specified site"""
-        try:
-            cookies = self.driver.get_cookies()
-            cookie_file = os.path.join('cookies', f'{site}_cookies.pkl')
-            with open(cookie_file, 'wb') as f:
-                pickle.dump(cookies, f)
-            log(f"Saved {site} cookies")
-        except Exception as e:
-            log(f"Error saving cookies: {e}")
     
     def get_translator(self):
         """Initialize translator on first use"""
@@ -271,134 +169,42 @@ class FinalProductScraper:
             return None
     
     def handle_login(self):
-        """Enhanced login handling with automatic captcha solving"""
-        try:
-            # Check if we're on a login page
-            if any(text in self.driver.page_source.lower() for text in 
-                   ["login", "sign in", "登录", "登入", "验证", "verify"]):
-                log("Login/verify screen detected")
-                
-                # Try to solve any captchas
-                self.solve_captchas()
-                
-                # Try guest options first
-                guest_selectors = [
-                    'a[href*="guest"]', 'a[href*="visitor"]', 
-                    'a:contains("guest")', 'a:contains("visitor")',
-                    'a:contains("continue")', 'button:contains("continue")'
-                ]
-                
-                for selector in guest_selectors:
-                    try:
-                        elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                        if elements:
-                            elements[0].click()
-                            log("Clicked guest/visitor link")
-                            time.sleep(2)
-                            return
-                    except:
-                        pass
-                
-                # If no guest option, try to use saved cookies
-                if self.driver.get_cookies():
-                    log("Using saved cookies for authentication")
-                    return
-                
-                # If still on login page, try to solve any remaining captchas
-                self.solve_captchas()
-                
-                # Wait for successful login
-                time.sleep(5)
-                
-                # Save cookies after successful login
-                if "1688.com" in self.driver.current_url:
-                    self.save_cookies("1688")
-                elif "taobao.com" in self.driver.current_url:
-                    self.save_cookies("taobao")
-                
-        except Exception as e:
-            log(f"Error in login handling: {e}")
-    
-    def solve_captchas(self):
-        """Solve various types of captchas"""
-        try:
-            # Check for reCAPTCHA v2
-            if self.driver.find_elements(By.CSS_SELECTOR, '.g-recaptcha'):
-                if self.captcha_solver and 'recaptcha_v2' in self.captcha_solver:
-                    site_key = self.driver.find_element(By.CSS_SELECTOR, '.g-recaptcha').get_attribute('data-sitekey')
-                    response = self.captcha_solver['recaptcha_v2'].solve_and_return_solution(site_key)
-                    if response:
-                        self.driver.execute_script(
-                            f'document.getElementById("g-recaptcha-response").innerHTML="{response}";'
-                        )
-                        log("Solved reCAPTCHA v2")
+        """Handle login screen if needed"""
+        log("Checking for login screen...")
+        
+        if any(text in self.driver.page_source.lower() for text in 
+               ["login", "sign in", "登录", "登入", "验证", "verify"]):
+            log("Login/verify screen detected")
             
-            # Check for reCAPTCHA v3
-            if self.driver.find_elements(By.CSS_SELECTOR, '[data-sitekey]'):
-                if self.captcha_solver and 'recaptcha_v3' in self.captcha_solver:
-                    site_key = self.driver.find_element(By.CSS_SELECTOR, '[data-sitekey]').get_attribute('data-sitekey')
-                    response = self.captcha_solver['recaptcha_v3'].solve_and_return_solution(site_key)
-                    if response:
-                        self.driver.execute_script(
-                            f'document.getElementById("g-recaptcha-response").innerHTML="{response}";'
-                        )
-                        log("Solved reCAPTCHA v3")
-            
-            # Check for hCaptcha
-            if self.driver.find_elements(By.CSS_SELECTOR, '.h-captcha'):
-                if self.captcha_solver and 'hcaptcha' in self.captcha_solver:
-                    site_key = self.driver.find_element(By.CSS_SELECTOR, '.h-captcha').get_attribute('data-sitekey')
-                    response = self.captcha_solver['hcaptcha'].solve_and_return_solution(site_key)
-                    if response:
-                        self.driver.execute_script(
-                            f'document.getElementById("h-captcha-response").innerHTML="{response}";'
-                        )
-                        log("Solved hCaptcha")
-            
-            # Check for slider captchas
-            slider_selectors = [
-                '.nc_iconfont.btn_slide',
-                '.nc-lang-cnt',
-                '.yidun_slider'
+            # Try guest options first
+            guest_selectors = [
+                'a[href*="guest"]', 'a[href*="visitor"]', 
+                'a:contains("guest")', 'a:contains("visitor")',
+                'a:contains("continue")', 'button:contains("continue")'
             ]
             
-            for selector in slider_selectors:
-                if self.driver.find_elements(By.CSS_SELECTOR, selector):
-                    try:
-                        slider = self.driver.find_element(By.CSS_SELECTOR, selector)
-                        action = webdriver.ActionChains(self.driver)
-                        action.click_and_hold(slider)
-                        action.move_by_offset(300, 0)  # Move slider to the right
-                        action.release()
-                        action.perform()
-                        log("Solved slider captcha")
+            for selector in guest_selectors:
+                try:
+                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    if elements:
+                        elements[0].click()
+                        log("Clicked guest/visitor link")
                         time.sleep(2)
-                    except:
-                        pass
+                        return
+                except:
+                    pass
             
-        except Exception as e:
-            log(f"Error solving captchas: {e}")
-    
-    def handle_cloudflare(self):
-        """Handle Cloudflare protection"""
-        try:
-            if "cloudflare" in self.driver.page_source.lower():
-                log("Cloudflare detected, attempting to bypass...")
-                
-                # Use cloudscraper to get the page
-                response = self.scraper.get(self.driver.current_url)
-                
-                # Update cookies
-                for cookie in self.scraper.cookies:
-                    self.driver.add_cookie(cookie)
-                
-                # Refresh the page
-                self.driver.refresh()
-                time.sleep(5)
-                
-                log("Cloudflare bypass attempted")
-        except Exception as e:
-            log(f"Error handling Cloudflare: {e}")
+            # If no guest option, take screenshot and ask user
+            self.driver.save_screenshot("login_screen.png")
+            log("A screenshot of the login screen has been saved as 'login_screen.png'")
+            
+            print("\n" + "="*70)
+            print("LOGIN REQUIRED: Please login in the browser window.")
+            print("After completing login, press Enter to continue.")
+            print("="*70 + "\n")
+            
+            input("Press Enter after you have logged in...")
+            time.sleep(3)
     
     def extract_json_data(self, page_source):
         """Try to extract structured product data from JSON in page source"""
@@ -794,7 +600,7 @@ class FinalProductScraper:
             return images
     
     def scrape_product(self, url):
-        """Enhanced product scraping with support for both 1688 and Taobao"""
+        """Scrape a single product"""
         try:
             log(f"Processing URL: {url}")
             
@@ -802,8 +608,10 @@ class FinalProductScraper:
             self.driver.get(url)
             time.sleep(5)  # Wait for initial load
             
-            # Handle Cloudflare if present
-            self.handle_cloudflare()
+            # Take screenshot for debugging
+            screenshot_path = f"product_{int(time.time())}.png"
+            self.driver.save_screenshot(screenshot_path)
+            log(f"Saved screenshot: {screenshot_path}")
             
             # Handle login if needed
             self.handle_login()
@@ -827,9 +635,6 @@ class FinalProductScraper:
             price = self.extract_price()
             description = self.extract_description()
             image_urls = self.extract_images()
-            variations = self.extract_variations()
-            shipping_info = self.extract_shipping_info()
-            seller_info = self.extract_seller_info()
             
             # Translate to English
             log("Translating product data...")
@@ -844,16 +649,15 @@ class FinalProductScraper:
                 description_en = self.translate_text(description)
                 log(f"Translated description (length: {len(description_en)})")
             
-            # Download images (skip duplicates)
+            # Download images
             local_image_paths = []
             if image_urls:
                 log(f"Downloading {len(image_urls)} images...")
                 
                 for img_url in image_urls:
-                    if not self.is_duplicate_image(img_url):
-                        local_path = self.download_image(img_url, name_en)
-                        if local_path:
-                            local_image_paths.append(local_path)
+                    local_path = self.download_image(img_url, name_en)
+                    if local_path:
+                        local_image_paths.append(local_path)
             
             # Create short description for WooCommerce
             short_description = description_en
@@ -861,23 +665,7 @@ class FinalProductScraper:
                 short_description = short_description[:147] + "..."
             
             # Generate SKU
-            sku = f"IMP-{str(uuid.uuid4())[:8]}"
-            
-            # Format variations for WooCommerce
-            variation_data = []
-            if variations:
-                for var in variations:
-                    variation_data.append(f"{var['name']}: {var['value']}")
-            
-            # Format shipping info
-            shipping_text = []
-            for key, value in shipping_info.items():
-                shipping_text.append(f"{key}: {value}")
-            
-            # Format seller info
-            seller_text = []
-            for key, value in seller_info.items():
-                seller_text.append(f"{key}: {value}")
+            sku = f"1688-{str(uuid.uuid4())[:8]}"
             
             # Create WooCommerce product data
             product_data = {
@@ -888,12 +676,9 @@ class FinalProductScraper:
                 'Short description': short_description,
                 'Images': ','.join(local_image_paths),
                 'In stock?': 1,
-                'Type': 'variable' if variations else 'simple',
+                'Type': 'simple',
                 'Categories': 'Imported Products',
-                'Original URL': url,
-                'Variations': '|'.join(variation_data) if variation_data else '',
-                'Shipping Info': '|'.join(shipping_text) if shipping_text else '',
-                'Seller Info': '|'.join(seller_text) if seller_text else ''
+                'Original URL': url
             }
             
             self.products.append(product_data)
@@ -906,7 +691,7 @@ class FinalProductScraper:
             return False
     
     def scrape_all_products(self, urls_file='urls.txt'):
-        """Process all products from URLs file with concurrent processing"""
+        """Process all products from URLs file"""
         # Clear existing products
         self.products = []
         
@@ -918,7 +703,6 @@ class FinalProductScraper:
             with open(urls_file, 'w', encoding='utf-8') as f:
                 f.write("https://detail.1688.com/offer/653499140995.html\n")
                 f.write("https://detail.1688.com/offer/636312391325.html\n")
-                f.write("https://item.taobao.com/item.htm?id=123456789\n")
             
             log(f"Created sample URLs file: {urls_file}")
         
@@ -938,43 +722,34 @@ class FinalProductScraper:
             self.driver.get("https://www.1688.com/")
             time.sleep(5)
             self.handle_login()
-            
-            # Also visit Taobao
-            self.driver.get("https://www.taobao.com/")
-            time.sleep(5)
-            self.handle_login()
         except Exception as e:
-            log(f"Error visiting homepages: {e}")
+            log(f"Error visiting homepage: {e}")
         
-        # Process URLs concurrently
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = []
-            for url in urls:
-                if not url.startswith('http'):
-                    log(f"Skipping invalid URL: {url}")
-                    continue
-                
-                # Add to queue
-                self.product_queue.put(url)
-                
-                # Submit task
-                future = executor.submit(self.scrape_product, url)
-                futures.append(future)
+        # Process each URL
+        for i, url in enumerate(urls):
+            if not url.startswith('http'):
+                log(f"Skipping invalid URL: {url}")
+                continue
             
-            # Wait for all tasks to complete
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    success = future.result()
-                    if not success:
-                        log("Failed to process a product")
-                except Exception as e:
-                    log(f"Error in concurrent processing: {e}")
+            log(f"Processing URL {i+1}/{len(urls)}")
+            success = self.scrape_product(url)
+            
+            if success:
+                log(f"Successfully processed URL {i+1}/{len(urls)}")
+            else:
+                log(f"Failed to process URL {i+1}/{len(urls)}")
+            
+            # Random delay between requests
+            if i < len(urls) - 1:
+                delay = random.uniform(3, 6)
+                log(f"Waiting {delay:.1f} seconds before next URL...")
+                time.sleep(delay)
         
         # Save results to CSV
         if self.products:
             df = pd.DataFrame(self.products)
             csv_file = 'woocommerce_products.csv'
-            df.to_csv(csv_file, index=False, encoding='utf-8-sig')
+            df.to_csv(csv_file, index=False)
             log(f"Saved {len(self.products)} products to {csv_file}")
             return True
         else:
@@ -988,177 +763,19 @@ class FinalProductScraper:
             log("WebDriver closed")
         except:
             pass
-    
-    def extract_variations(self):
-        """Extract product variations (size, color, etc.)"""
-        variations = []
-        try:
-            # Common variation selectors
-            selectors = [
-                '.sku-property', '.sku-item', '.sku-select',
-                '.product-sku', '.sku-list', '.sku-property-item'
-            ]
-            
-            for selector in selectors:
-                elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                if elements:
-                    for element in elements:
-                        try:
-                            # Get variation name
-                            name = element.get_attribute('title') or element.text
-                            if name:
-                                # Get variation value
-                                value = element.get_attribute('data-value') or element.get_attribute('value')
-                                if value:
-                                    variations.append({
-                                        'name': self.translate_text(name),
-                                        'value': self.translate_text(value)
-                                    })
-                        except:
-                            continue
-            
-            # Try to find variations in JSON data
-            if not variations:
-                json_data = self.extract_json_data(self.driver.page_source)
-                if json_data:
-                    # Look for common variation patterns
-                    for key in ['skuProps', 'skuList', 'variations', 'properties']:
-                        if key in json_data:
-                            try:
-                                props = json_data[key]
-                                if isinstance(props, list):
-                                    for prop in props:
-                                        if isinstance(prop, dict):
-                                            name = prop.get('name', '')
-                                            value = prop.get('value', '')
-                                            if name and value:
-                                                variations.append({
-                                                    'name': self.translate_text(name),
-                                                    'value': self.translate_text(value)
-                                                })
-                            except:
-                                continue
-            
-            return variations
-        except Exception as e:
-            log(f"Error extracting variations: {e}")
-            return variations
-    
-    def extract_shipping_info(self):
-        """Extract shipping information"""
-        shipping_info = {}
-        try:
-            # Common shipping selectors
-            selectors = {
-                'shipping_fee': ['.shipping-fee', '.logistics-fee', '.delivery-fee'],
-                'shipping_time': ['.shipping-time', '.delivery-time', '.logistics-time'],
-                'shipping_method': ['.shipping-method', '.delivery-method', '.logistics-method']
-            }
-            
-            for key, selector_list in selectors.items():
-                for selector in selector_list:
-                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    if elements:
-                        text = elements[0].text.strip()
-                        if text:
-                            shipping_info[key] = self.translate_text(text)
-                            break
-            
-            # Try to find shipping info in JSON data
-            if not shipping_info:
-                json_data = self.extract_json_data(self.driver.page_source)
-                if json_data:
-                    # Look for common shipping patterns
-                    for key in ['shipping', 'logistics', 'delivery']:
-                        if key in json_data:
-                            try:
-                                info = json_data[key]
-                                if isinstance(info, dict):
-                                    for k, v in info.items():
-                                        if isinstance(v, (str, int, float)):
-                                            shipping_info[k] = self.translate_text(str(v))
-                            except:
-                                continue
-            
-            return shipping_info
-        except Exception as e:
-            log(f"Error extracting shipping info: {e}")
-            return shipping_info
-    
-    def extract_seller_info(self):
-        """Extract seller information"""
-        seller_info = {}
-        try:
-            # Common seller selectors
-            selectors = {
-                'name': ['.seller-name', '.shop-name', '.store-name'],
-                'rating': ['.seller-rating', '.shop-rating', '.store-rating'],
-                'location': ['.seller-location', '.shop-location', '.store-location'],
-                'response_rate': ['.response-rate', '.reply-rate'],
-                'response_time': ['.response-time', '.reply-time']
-            }
-            
-            for key, selector_list in selectors.items():
-                for selector in selector_list:
-                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    if elements:
-                        text = elements[0].text.strip()
-                        if text:
-                            seller_info[key] = self.translate_text(text)
-                            break
-            
-            # Try to find seller info in JSON data
-            if not seller_info:
-                json_data = self.extract_json_data(self.driver.page_source)
-                if json_data:
-                    # Look for common seller patterns
-                    for key in ['seller', 'shop', 'store']:
-                        if key in json_data:
-                            try:
-                                info = json_data[key]
-                                if isinstance(info, dict):
-                                    for k, v in info.items():
-                                        if isinstance(v, (str, int, float)):
-                                            seller_info[k] = self.translate_text(str(v))
-                            except:
-                                continue
-            
-            return seller_info
-        except Exception as e:
-            log(f"Error extracting seller info: {e}")
-            return seller_info
-    
-    def is_duplicate_image(self, image_url):
-        """Check if an image is a duplicate using content hash"""
-        try:
-            # Download image content
-            response = requests.get(image_url, timeout=10)
-            if response.status_code == 200:
-                # Calculate image hash
-                image_hash = hashlib.md5(response.content).hexdigest()
-                
-                # Check if hash exists
-                if image_hash in self.image_hashes:
-                    return True
-                
-                # Add hash to set
-                self.image_hashes.add(image_hash)
-                return False
-        except:
-            pass
-        return False
 
 # Main execution
 if __name__ == "__main__":
+    # Clear log file
+    with open('scraper_log.txt', 'w', encoding='utf-8') as f:
+        f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Starting product scraper\n")
+    
     print("=" * 70)
-    print("FINAL VERSION: 1688.com and Taobao.com Product Scraper for WooCommerce")
+    print("FINAL VERSION: 1688.com Product Scraper for WooCommerce")
     print("=" * 70)
-    print("\nThis script will automatically:")
-    print("1. Handle login and captchas")
-    print("2. Scrape product data from both 1688.com and Taobao.com")
-    print("3. Translate Chinese text to English")
-    print("4. Download and deduplicate images")
-    print("5. Save results in WooCommerce-compatible format\n")
+    print("\nNOTE: This script requires ONE-TIME manual login if prompted.")
+    print("A browser window will open. If you see a login screen, please log in manually.")
+    print("After login, the script will continue automatically.\n")
     
     scraper = FinalProductScraper()
     
@@ -1169,10 +786,10 @@ if __name__ == "__main__":
             print("\nScraping completed successfully!")
             print("Results saved to woocommerce_products.csv")
             print("Product images saved to product_images folder")
-            print("Logs saved to logs folder")
+            print("Log file saved to scraper_log.txt")
         else:
             print("\nScraping completed with issues.")
-            print("Check logs folder for details")
+            print("Check scraper_log.txt for details")
     except Exception as e:
         print(f"\nAn error occurred: {e}")
     finally:
