@@ -682,6 +682,79 @@ def extract_product_info(html_content, url):
             "sku": f"1688-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}"
         }
 
+def clean_description(description):
+    """Clean unwanted text from product descriptions while preserving the full content"""
+    if not description:
+        return ""
+    
+    # Common Alibaba-related patterns to remove
+    patterns_to_remove = [
+        # Remove Alibaba promotional text
+        r'(?i)Alibaba\.com(?:\s+offers)?',
+        r'(?i)Visit Alibaba\.com(?:\s+for)?',
+        r'(?i)Alibaba Group',
+        r'(?i)Alibaba\.com website',
+        r'(?i)Alibaba\.com member',
+        r'(?i)on Alibaba\.com',
+        r'(?i)at Alibaba\.com',
+        r'(?i)from Alibaba\.com',
+        r'(?i)Alibaba\.com and all related logos',
+        r'(?i)Alibaba\.com is the world\'s largest',
+        
+        # Remove common promotional phrases
+        r'(?i)here gathered a wide range of suppliers, buyers, manufacturers',
+        r'(?i)for more .* information, please visit Alibaba wholesale network!',
+        r'(?i)for more .* please visit Alibaba\.com',
+        r'(?i)for more details on .* please visit Alibaba\.com',
+        r'(?i)Alibaba\.com has quality .* and more',
+        r'(?i)click here to get more',
+        r'(?i)shop now on Alibaba\.com',
+        r'(?i)Alibaba\.com offers you',
+        r'(?i)find quality .* on Alibaba\.com',
+        
+        # Remove tracking parameters from URLs if any
+        r'\?spm=[^\s]+',
+        r'\?[a-zA-Z0-9_]+=[^\s&]+',
+        
+        # Remove any remaining Alibaba references
+        r'(?i)Alibaba',
+        r'(?i)1688\.com'
+    ]
+    
+    cleaned = description
+    
+    # Remove patterns
+    for pattern in patterns_to_remove:
+        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+    
+    # Clean up text formatting
+    cleaned = re.sub(r'\s+', ' ', cleaned)  # Replace multiple spaces with single space
+    cleaned = re.sub(r'\s*,\s*', ', ', cleaned)  # Fix spaces around commas
+    cleaned = re.sub(r'\s+\.', '.', cleaned)  # Remove spaces before periods
+    cleaned = re.sub(r'\s*\n+\s*', '\n\n', cleaned)  # Normalize line breaks
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)  # Remove excessive line breaks
+    
+    # Clean up punctuation
+    cleaned = re.sub(r'\.{2,}', '.', cleaned)  # Replace multiple periods with one
+    cleaned = re.sub(r'\s*,\s*$', '', cleaned)  # Remove trailing comma
+    
+    # Capitalize first letter of each sentence
+    sentences = re.split(r'(\.\s*)', cleaned)
+    cleaned = ''
+    for i in range(0, len(sentences)-1, 2):
+        if i+1 < len(sentences):
+            sentence = sentences[i].strip()
+            if sentence:
+                sentence = sentence[0].upper() + sentence[1:] if sentence else ''
+                cleaned += sentence + (sentences[i+1] if i+1 < len(sentences) else '')
+    
+    # Final cleanup
+    cleaned = cleaned.strip()
+    if not cleaned.endswith(('.', '!', '?')):
+        cleaned = cleaned.rstrip('.,!?') + '.'
+    
+    return cleaned
+
 def process_product_for_woocommerce(product_info, html_content, url):
     """Process product data for WooCommerce import"""
     try:
@@ -694,18 +767,21 @@ def process_product_for_woocommerce(product_info, html_content, url):
         price = product_info.get('price', '0')
         images = product_info.get('images', [])
         
-        # Translate content
+        # Translate content first, then clean
         translated_name = translate_to_english(name)
         translated_description = translate_to_english(description)
         
-        # Set basic product information
+        # Clean the translated description
+        cleaned_description = clean_description(translated_description)
+        
+        # Set basic product information with cleaned description
         woo_product.set_basic_info(
             name=translated_name,
-            description=translated_description,
+            description=cleaned_description,
             price=price,
             sku=f"1688-{int(time.time())}",
             url=url,
-            short_description=translated_description[:160] + '...' if translated_description else ''
+            short_description=cleaned_description[:160] + '...' if cleaned_description else ''
         )
         
         # Add category
